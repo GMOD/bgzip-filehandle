@@ -36,11 +36,9 @@
   ],
   "dependencies": {
     "generic-filehandle2": "^1.0.0",
-    "long": "^4.0.0",
     "pako": "^1.0.11"
   },
   "devDependencies": {
-    "@types/long": "^4.0.1",
     "@types/node": "^18.11.16",
     "@types/pako": "^2.0.0",
     "@typescript-eslint/eslint-plugin": "^8.16.0",

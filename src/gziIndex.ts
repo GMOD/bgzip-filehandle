@@ -1,13 +1,24 @@
-import Long from 'long'
 import { LocalFile, GenericFilehandle } from 'generic-filehandle2'
 
 // const COMPRESSED_POSITION = 0
 const UNCOMPRESSED_POSITION = 1
 
+const TWO_PWR_16_DBL = 1 << 16
+const TWO_PWR_32_DBL = TWO_PWR_16_DBL * TWO_PWR_16_DBL
+
+// extracted from long.js, license Apache 2.0 https://github.com/dcodeIO/long.js
+function longFromBytesUnsignedLE(bytes: Uint8Array) {
+  const low =
+    bytes[0]! | (bytes[1]! << 8) | (bytes[2]! << 16) | (bytes[3]! << 24)
+  const high =
+    bytes[4]! | (bytes[5]! << 8) | (bytes[6]! << 16) | (bytes[7]! << 24)
+  return (high >>> 0) * TWO_PWR_32_DBL + (low >>> 0)
+}
+
 export default class GziIndex {
   filehandle: GenericFilehandle
 
-  index?: any
+  index?: Promise<[number, number][]>
 
   constructor({
     filehandle,
@@ -25,29 +36,19 @@ export default class GziIndex {
     }
   }
 
-  _readLongWithOverflow(buf: Uint8Array, offset = 0, unsigned = true) {
-    //@ts-ignore
-    const long = Long.fromBytesLE(buf.slice(offset, offset + 8), unsigned)
-    if (
-      long.greaterThan(Number.MAX_SAFE_INTEGER) ||
-      long.lessThan(Number.MIN_SAFE_INTEGER)
-    ) {
-      throw new TypeError('integer overflow')
-    }
-
-    return long.toNumber()
-  }
-
   _getIndex() {
     if (!this.index) {
-      this.index = this._readIndex()
+      this.index = this._readIndex().catch((e: unknown) => {
+        this.index = undefined
+        throw e
+      })
     }
     return this.index
   }
 
   async _readIndex(): Promise<[number, number][]> {
     const buf = await this.filehandle.read(8, 0)
-    const numEntries = this._readLongWithOverflow(buf, 0, true)
+    const numEntries = longFromBytesUnsignedLE(buf.subarray(0, 8))
     if (!numEntries) {
       return [[0, 0]]
     }
@@ -62,13 +63,11 @@ export default class GziIndex {
     }
     const buf2 = await this.filehandle.read(bufSize, 8)
     for (let entryNumber = 0; entryNumber < numEntries; entryNumber += 1) {
-      const compressedPosition = this._readLongWithOverflow(
-        buf2,
-        entryNumber * 16,
+      const compressedPosition = longFromBytesUnsignedLE(
+        buf2.subarray(entryNumber * 16, entryNumber * 16 + 8),
       )
-      const uncompressedPosition = this._readLongWithOverflow(
-        buf2,
-        entryNumber * 16 + 8,
+      const uncompressedPosition = longFromBytesUnsignedLE(
+        buf2.subarray(entryNumber * 16 + 8, entryNumber * 16 + 16),
       )
       entries[entryNumber + 1] = [compressedPosition, uncompressedPosition]
     }
@@ -78,10 +77,7 @@ export default class GziIndex {
 
   async getLastBlock() {
     const entries = await this._getIndex()
-    if (!entries.length) {
-      return undefined
-    }
-    return entries[entries.length - 1]
+    return entries.at(-1)
   }
 
   async getRelevantBlocksForRead(length: number, position: number) {
@@ -94,24 +90,24 @@ export default class GziIndex {
 
     // binary search to find the block that the
     // read starts in and extend forward from that
-    const compare = (entry: any, nextEntry: any) => {
+    const compare = (entry: [number, number], nextEntry?: [number, number]) => {
       const uncompressedPosition = entry[UNCOMPRESSED_POSITION]
       const nextUncompressedPosition = nextEntry
         ? nextEntry[UNCOMPRESSED_POSITION]
         : Infinity
-      // block overlaps read start
       if (
         uncompressedPosition <= position &&
         nextUncompressedPosition > position
       ) {
+        // block overlaps read start
         return 0
+      } else if (uncompressedPosition < position) {
         // block is before read start
-      }
-      if (uncompressedPosition < position) {
         return -1
+      } else {
+        // block is after read start
+        return 1
       }
-      // block is after read start
-      return 1
     }
 
     let lowerBound = 0
@@ -119,7 +115,7 @@ export default class GziIndex {
     let searchPosition = Math.floor(entries.length / 2)
 
     let comparison = compare(
-      entries[searchPosition],
+      entries[searchPosition]!,
       entries[searchPosition + 1],
     )
     while (comparison !== 0) {
@@ -129,7 +125,10 @@ export default class GziIndex {
         lowerBound = searchPosition + 1
       }
       searchPosition = Math.ceil((upperBound - lowerBound) / 2) + lowerBound
-      comparison = compare(entries[searchPosition], entries[searchPosition + 1])
+      comparison = compare(
+        entries[searchPosition]!,
+        entries[searchPosition + 1],
+      )
     }
 
     // here's where we read forward
@@ -137,11 +136,11 @@ export default class GziIndex {
     let i = searchPosition + 1
     for (; i < entries.length; i += 1) {
       relevant.push(entries[i])
-      if (entries[i][UNCOMPRESSED_POSITION] >= endPosition) {
+      if (entries[i]![UNCOMPRESSED_POSITION] >= endPosition) {
         break
       }
     }
-    if (relevant[relevant.length - 1][UNCOMPRESSED_POSITION] < endPosition) {
+    if (relevant[relevant.length - 1]![UNCOMPRESSED_POSITION] < endPosition) {
       relevant.push([])
     }
     return relevant
